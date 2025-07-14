@@ -73,3 +73,6 @@ logs/
 
 # Exclude retrievers directory
 retrievers/
+
+# Exclude large toolbox binary
+toolbox
