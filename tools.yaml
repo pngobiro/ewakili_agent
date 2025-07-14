@@ -1,0 +1,698 @@
+sources:
+  legal_db:
+    kind: "neo4j"
+    uri: "bolt://host.docker.internal:7687"
+    user: "neo4j"
+    password: "f7DEfxd9wy5."
+    database: "neo4j"
+
+tools:
+  get_similar_cases_by_legal_principle:
+    kind: neo4j-cypher
+    source: legal_db
+    description: "Get similar cases based on legal principles."
+    parameters:
+      - name: query_embedding
+        type: string
+        description: "JSON string of the query embedding vector"
+      - name: country_code
+        type: string
+        description: "Country code to filter cases by (e.g., KE, UG, TZ)"
+    statement: |
+      CALL {
+          MATCH (c:Case)-[:HAS_SUMMARY]->(cs:CaseSummary)
+          WHERE cs.case_summary_embeddings IS NOT NULL
+          AND c.metadata_country = $country_code
+          WITH c, cs, gds.similarity.cosine(apoc.convert.fromJsonList($query_embedding), cs.case_summary_embeddings) AS similarity
+          WHERE similarity > 0.5
+          RETURN c, cs, similarity, 'summary' AS match_type
+
+          UNION
+
+          MATCH (c:Case)-[:HAS_LEGAL_PRINCIPLES]->(lp:LegalPrinciple)
+          WHERE lp.case_legal_principle_embeddings IS NOT NULL
+          AND c.metadata_country = $country_code
+          WITH c, lp, gds.similarity.cosine(lp.case_legal_principle_embeddings, apoc.convert.fromJsonList($query_embedding)) AS similarity
+          WHERE similarity > 0.7
+          RETURN c, lp AS cs, similarity, 'principle' AS match_type
+      }
+      
+      WITH c, cs, similarity, match_type
+      ORDER BY similarity DESC
+      LIMIT 30
+      
+      OPTIONAL MATCH (c)-[:HAS_JUDGES]->(j:Judge)
+      OPTIONAL MATCH (c)-[:HAS_SUMMARY]->(cs2:CaseSummary)
+      OPTIONAL MATCH (c)-[:HAS_ISSUES]->(li:LegalIssue)
+      OPTIONAL MATCH (c)-[:HAS_OUTCOMES]->(lo:LegalOutcome)
+      OPTIONAL MATCH (c)-[:HAS_LAWS_APPLIED]->(law:Law)
+      OPTIONAL MATCH (c)-[:HAS_LEGAL_PRINCIPLES]->(all_lp:LegalPrinciple)
+      OPTIONAL MATCH (c)-[:HAS_ARGUMENTS]->(la:LegalArgument)
+      OPTIONAL MATCH (c)-[:HAS_LEGAL_PRECEDENTS]->(lprec:LegalPrecedent)
+      OPTIONAL MATCH (c)-[:HAS_FACTS]->(lf:LegalFact)
+      OPTIONAL MATCH (c)-[:HAS_PRAYERS]->(pr:Prayer)
+      
+      WITH c, cs, similarity, match_type, cs2,
+      collect(DISTINCT { judge_name: j.judge_name, judge_type: j.judge_type, judge_id: j.judge_id }) AS judges,
+      collect(DISTINCT { issue: li.issue, issue_raised_by: li.issue_raised_by, issue_outcome: li.issue_outcome }) AS legal_issues,
+      collect(DISTINCT { outcome: lo.outcome, outcome_date: lo.outcome_date, outcome_reason: lo.outcome_reason, outcome_type: lo.outcome_type}) AS legal_outcomes,
+      collect(DISTINCT { law_id: law.law_id, law: law.law, law_section: law.law_section, law_subsection: law.law_subsection, law_text: law.law_text, law_summary: law.law_summary, law_date: law.law_date, law_type: law.law_type }) AS laws_applied,
+      collect(DISTINCT { principle: all_lp.principle, principle_text: all_lp.principle_text, principle_source: all_lp.principle_source, principle_type: all_lp.principle_type, principle_id: all_lp.principle_id}) AS all_principles,
+      collect(DISTINCT { argument: la.argument, argument_by: la.argument_by, argument_type: la.argument_type, argument_status: la.argument_status, argument_strength: la.argument_strength }) AS legal_arguments,
+      collect(DISTINCT { precedent: lprec.precedent, precedent_text: lprec.precedent_text, precedent_source: lprec.precedent_source, precedent_id: lprec.precedent_id }) AS legal_precedents,
+      collect(DISTINCT { fact: lf.fact, fact_type: lf.fact_type, fact_date: lf.fact_date, fact_by: lf.fact_by, fact_location: lf.fact_location, corroborating_evidence: lf.corroborating_evidence }) AS legal_facts,
+      collect(DISTINCT { prayer_type: pr.prayer_type, prayer_status: pr.prayer_status, prayer_by: pr.prayer_by, prayer: pr.prayer }) AS prayers
+      
+      RETURN {
+          case: c {
+              .case_citation, .case_number, .date_filed, .court_location, .court_level, .jurisdiction, 
+              .case_action, .case_stage, .metadata_citation, .metadata_case_number, .metadata_date_delivered, 
+              .metadata_parties, .metadata_court, .metadata_advocate, .metadata_judges, .metadata_county, 
+              .metadata_doc_url, .metadata_url, .id, .court, .case_type, .case_sub_type,
+              .metadata_country
+          },
+          matched_item: CASE 
+              WHEN match_type = 'summary' THEN { summary: cs.summary }
+              WHEN match_type = 'principle' THEN { principle: cs.principle, principle_text: cs.principle_text, principle_source: cs.principle_source, principle_type: cs.principle_type, principle_id: cs.principle_id }
+              ELSE null
+          END,
+          match_type: match_type,
+          judges: judges,
+          case_summary: cs2.summary,
+          legal_issues: legal_issues,
+          legal_outcomes: legal_outcomes,
+          laws_applied: laws_applied,
+          legal_principles: all_principles,
+          legal_arguments: legal_arguments,
+          legal_precedents: legal_precedents,
+          legal_facts: legal_facts,
+          prayers: prayers,
+          matched_text: CASE 
+              WHEN match_type = 'summary' THEN cs.summary
+              WHEN match_type = 'principle' THEN cs.principle
+              ELSE null
+          END,
+          similarity: similarity,
+          country: c.metadata_country
+      } AS result
+      ORDER BY similarity DESC
+
+  get_similar_cases_by_law_applied:
+    kind: neo4j-cypher
+    source: legal_db
+    description: "Get similar cases based on law applied."
+    parameters:
+      - name: query_embedding
+        type: string
+        description: "JSON string of the query embedding vector"
+      - name: country_code
+        type: string
+        description: "Country code to filter cases by (e.g., KE, UG, TZ)"
+    statement: |
+      CALL {
+          MATCH (c:Case)-[:HAS_SUMMARY]->(cs:CaseSummary)
+          WHERE cs.case_summary_embeddings IS NOT NULL
+          AND c.metadata_country = $country_code
+          WITH c, cs, gds.similarity.cosine(apoc.convert.fromJsonList($query_embedding), cs.case_summary_embeddings) AS similarity
+          WHERE similarity > 0.5
+          RETURN c, cs, similarity, 'summary' AS match_type
+
+          UNION
+
+          MATCH (c:Case)-[:HAS_LAWS_APPLIED]->(l:Law)
+          WHERE l.law_embeddings IS NOT NULL
+          AND c.metadata_country = $country_code
+          WITH c, l, gds.similarity.cosine(l.law_embeddings, apoc.convert.fromJsonList($query_embedding)) AS similarity
+          WHERE similarity > 0.7
+          RETURN c, l AS cs, similarity, 'law' AS match_type
+      }
+
+      WITH c, cs, similarity, match_type
+      ORDER BY similarity DESC
+      LIMIT 20
+
+      OPTIONAL MATCH (c)-[:HAS_JUDGES]->(j:Judge)
+      OPTIONAL MATCH (c)-[:HAS_ISSUES]->(li:LegalIssue)
+      OPTIONAL MATCH (c)-[:HAS_OUTCOMES]->(lo:LegalOutcome)
+      OPTIONAL MATCH (c)-[:HAS_LAWS_APPLIED]->(law:Law)
+      OPTIONAL MATCH (c)-[:HAS_LEGAL_PRINCIPLES]->(lp:LegalPrinciple)
+      OPTIONAL MATCH (c)-[:HAS_ARGUMENTS]->(la:LegalArgument)
+      OPTIONAL MATCH (c)-[:HAS_LEGAL_PRECEDENTS]->(lprec:LegalPrecedent)
+      OPTIONAL MATCH (c)-[:HAS_FACTS]->(lf:LegalFact)
+      OPTIONAL MATCH (c)-[:HAS_PRAYERS]->(pr:Prayer)
+
+      WITH c, cs, similarity, match_type,
+      collect(DISTINCT { judge_name: j.judge_name, judge_type: j.judge_type, judge_id: j.judge_id }) AS judges,
+      collect(DISTINCT { issue: li.issue, issue_raised_by: li.issue_raised_by, issue_outcome: li.issue_outcome }) AS legal_issues,
+      collect(DISTINCT { outcome: lo.outcome, outcome_date: lo.outcome_date, outcome_reason: lo.outcome_reason, outcome_type: lo.outcome_type}) AS legal_outcomes,
+      collect(DISTINCT { 
+          law_id: law.law_id,
+          law: law.law,
+          law_section: law.law_section,
+          law_subsection: law.law_subsection,
+          law_text: law.law_text,
+          law_summary: law.law_summary,
+          law_date: law.law_date,
+          law_type: law.law_type
+      }) AS laws_applied,
+      collect(DISTINCT { principle: lp.principle, principle_text: lp.principle_text, principle_source: lp.principle_source, principle_type: lp.principle_type, principle_id: lp.principle_id}) AS legal_principles,
+      collect(DISTINCT { argument: la.argument, argument_by: la.argument_by, argument_type: la.argument_type, argument_status: la.argument_status, argument_strength: la.argument_strength }) AS legal_arguments,
+      collect(DISTINCT { precedent: lprec.precedent, precedent_text: lprec.precedent_text, precedent_source: lprec.precedent_source, precedent_id: lprec.precedent_id }) AS legal_precedents,
+      collect(DISTINCT { fact: lf.fact, fact_type: lf.fact_type, fact_date: lf.fact_date, fact_by: lf.fact_by, fact_location: lf.fact_location, corroborating_evidence: lf.corroborating_evidence }) AS legal_facts,
+      collect(DISTINCT { prayer_type: pr.prayer_type, prayer_status: pr.prayer_status, prayer_by: pr.prayer_by, prayer: pr.prayer }) AS prayers
+
+      RETURN {
+          case: c {
+              .case_citation, .case_number, .date_filed, .court_location, .court_level, .jurisdiction, 
+              .case_action, .case_stage, .metadata_citation, .metadata_case_number, .metadata_date_delivered, 
+              .metadata_parties, .metadata_court, .metadata_advocate, .metadata_judges, .metadata_county, 
+              .metadata_doc_url, .metadata_url, .id, .court, .case_type, .case_sub_type,
+              .metadata_country
+          },
+          matched_item: CASE 
+              WHEN match_type = 'summary' THEN { summary: cs.summary }
+              WHEN match_type = 'law' THEN { 
+                  law_id: cs.law_id,
+                  law: cs.law,
+                  law_section: cs.law_section,
+                  law_subsection: cs.law_subsection,
+                  law_text: cs.law_text,
+                  law_summary: cs.law_summary,
+                  law_date: cs.law_date,
+                  law_type: cs.law_type
+              }
+              ELSE null
+          END,
+          match_type: match_type,
+          judges: judges,
+          case_summary: cs.summary,
+          legal_issues: legal_issues,
+          legal_outcomes: legal_outcomes,
+          laws_applied: laws_applied,
+          legal_principles: legal_principles,
+          legal_arguments: legal_arguments,
+          legal_precedents: legal_precedents,
+          legal_facts: legal_facts,
+          prayers: prayers,
+          matched_text: CASE 
+              WHEN match_type = 'summary' THEN cs.summary
+              WHEN match_type = 'law' THEN cs.law_text
+              ELSE null
+          END,
+          similarity: similarity,
+          country: c.metadata_country
+      } AS result
+      ORDER BY similarity DESC
+
+  get_similar_cases_by_legal_precedents:
+    kind: neo4j-cypher
+    source: legal_db
+    description: "Get similar cases based on legal precedents."
+    parameters:
+      - name: query_embedding
+        type: string
+        description: "JSON string of the query embedding vector"
+      - name: country_code
+        type: string
+        description: "Country code to filter cases by (e.g., KE, UG, TZ)"
+    statement: |
+      CALL {
+          MATCH (c:Case)-[:HAS_SUMMARY]->(cs:CaseSummary)
+          WHERE cs.case_summary_embeddings IS NOT NULL
+          AND c.metadata_country = $country_code
+          WITH c, cs, gds.similarity.cosine(apoc.convert.fromJsonList($query_embedding), cs.case_summary_embeddings) AS similarity
+          WHERE similarity > 0.5
+          RETURN c, cs, similarity, 'summary' AS match_type
+    
+          UNION
+    
+          MATCH (c:Case)-[:HAS_LEGAL_PRECEDENTS]->(lp:LegalPrecedent)
+          WHERE lp.legal_precedent_embeddings IS NOT NULL
+          AND c.metadata_country = $country_code
+          WITH c, lp, gds.similarity.cosine(lp.legal_precedent_embeddings, apoc.convert.fromJsonList($query_embedding)) AS similarity
+          WHERE similarity > 0.7
+          RETURN c, lp AS cs, similarity, 'precedent' AS match_type
+      }
+    
+      WITH c, cs, similarity, match_type
+      ORDER BY similarity DESC
+      LIMIT 30
+    
+      OPTIONAL MATCH (c)-[:HAS_JUDGES]->(j:Judge)
+      OPTIONAL MATCH (c)-[:HAS_SUMMARY]->(cs2:CaseSummary)
+      OPTIONAL MATCH (c)-[:HAS_ISSUES]->(li:LegalIssue)
+      OPTIONAL MATCH (c)-[:HAS_OUTCOMES]->(lo:LegalOutcome)
+      OPTIONAL MATCH (c)-[:HAS_LAWS_APPLIED]->(law:Law)
+      OPTIONAL MATCH (c)-[:HAS_LEGAL_PRINCIPLES]->(lprin:LegalPrinciple)
+      OPTIONAL MATCH (c)-[:HAS_ARGUMENTS]->(la:LegalArgument)
+      OPTIONAL MATCH (c)-[:HAS_FACTS]->(lf:LegalFact)
+      OPTIONAL MATCH (c)-[:HAS_PRAYERS]->(pr:Prayer)
+      OPTIONAL MATCH (c)-[:HAS_LEGAL_PRECEDENTS]->(all_lp:LegalPrecedent)
+    
+      WITH c, cs, similarity, match_type, cs2,
+      collect(DISTINCT { judge_name: j.judge_name, judge_type: j.judge_type, judge_id: j.judge_id }) AS judges,
+      collect(DISTINCT { issue: li.issue, issue_raised_by: li.issue_raised_by, issue_outcome: li.issue_outcome }) AS legal_issues,
+      collect(DISTINCT { outcome: lo.outcome, outcome_date: lo.outcome_date, outcome_reason: lo.outcome_reason, outcome_type: lo.outcome_type}) AS legal_outcomes,
+      collect(DISTINCT { law_id: law.law_id, law: law.law, law_section: law.law_section, law_subsection: law.law_subsection, law_text: law.law_text, law_summary: law.law_summary, law_date: law.law_date, law_type: law.law_type }) AS laws_applied,
+      collect(DISTINCT { principle: lprin.principle, principle_text: lprin.principle_text, principle_source: lprin.principle_source, principle_type: lprin.principle_type, principle_id: lprin.principle_id}) AS legal_principles,
+      collect(DISTINCT { argument: la.argument, argument_by: la.argument_by, argument_type: la.argument_type, argument_status: la.argument_status, argument_strength: la.argument_strength }) AS legal_arguments,
+      collect(DISTINCT { fact: lf.fact, fact_type: lf.fact_type, fact_date: lf.fact_date, fact_by: lf.fact_by, fact_location: lf.fact_location, corroborating_evidence: lf.corroborating_evidence }) AS legal_facts,
+      collect(DISTINCT { prayer_type: pr.prayer_type, prayer_status: pr.prayer_status, prayer_by: pr.prayer_by, prayer: pr.prayer }) AS prayers,
+      collect(DISTINCT { precedent: all_lp.precedent, precedent_text: all_lp.precedent_text, precedent_source: all_lp.precedent_source, precedent_id: all_lp.precedent_id }) AS all_precedents
+    
+      RETURN {
+          case: c {
+              .case_citation, .case_number, .date_filed, .court_location, .court_level, .jurisdiction, 
+              .case_action, .case_stage, .metadata_citation, .metadata_case_number, .metadata_date_delivered, 
+              .metadata_parties, .metadata_court, .metadata_advocate, .metadata_judges, .metadata_county, 
+              .metadata_doc_url, .metadata_url, .id, .court, .case_type, .case_sub_type,
+              .metadata_country
+          },
+          matched_item: CASE 
+              WHEN match_type = 'summary' THEN { summary: cs.summary }
+              WHEN match_type = 'precedent' THEN { precedent: cs.precedent, precedent_text: cs.precedent_text, precedent_source: cs.precedent_source, precedent_id: cs.precedent_id }
+              ELSE null
+          END,
+          match_type: match_type,
+          judges: judges,
+          case_summary: cs2.summary,
+          legal_issues: legal_issues,
+          legal_outcomes: legal_outcomes,
+          laws_applied: laws_applied,
+          legal_principles: legal_principles,
+          legal_arguments: legal_arguments,
+          legal_facts: legal_facts,
+          prayers: prayers,
+          legal_precedents: all_precedents,
+          matched_text: CASE 
+              WHEN match_type = 'summary' THEN cs.summary
+              WHEN match_type = 'precedent' THEN cs.precedent
+              ELSE null
+          END,
+          similarity: similarity,
+          country: c.metadata_country
+      } AS result
+      ORDER BY similarity DESC
+
+  get_similar_cases_by_case_summary:
+    kind: neo4j-cypher
+    source: legal_db
+    description: "Get similar cases based on case summaries."
+    parameters:
+      - name: query_embedding
+        type: string
+        description: "JSON string of the query embedding vector"
+      - name: country_code
+        type: string
+        description: "Country code to filter cases by (e.g., KE, UG, TZ)"
+    statement: |
+      CALL {
+          MATCH (c:Case)-[:HAS_SUMMARY]->(cs:CaseSummary)
+          WHERE cs.case_summary_embeddings IS NOT NULL
+          AND c.metadata_country = $country_code
+          WITH c, cs, gds.similarity.cosine(apoc.convert.fromJsonList($embedding), cs.case_summary_embeddings) AS similarity
+          WHERE similarity > 0.5
+          RETURN c, cs, similarity, 'summary' AS match_type
+
+          UNION
+
+          MATCH (c:Case)-[:HAS_PRAYERS]->(p:Prayer)
+          WHERE p.prayer_embeddings IS NOT NULL
+          AND c.metadata_country = $country_code
+          WITH c, p, gds.similarity.cosine(apoc.convert.fromJsonList($embedding), p.prayer_embeddings) AS similarity
+          WHERE similarity > 0.7
+          RETURN c, p AS cs, similarity, 'prayer' AS match_type
+
+          UNION
+
+          MATCH (c:Case)-[:HAS_ISSUES]->(i:LegalIssue)
+          WHERE i.legal_issue_embeddings IS NOT NULL
+          AND c.metadata_country = $country_code
+          WITH c, i, gds.similarity.cosine(apoc.convert.fromJsonList($embedding), i.legal_issue_embeddings) AS similarity
+          WHERE similarity > 0.7
+          RETURN c, i AS cs, similarity, 'issue' AS match_type
+      }
+
+      WITH c, cs, similarity, match_type
+      ORDER BY similarity DESC
+      LIMIT 20
+
+      OPTIONAL MATCH (c)-[:HAS_JUDGES]->(j:Judge)
+      OPTIONAL MATCH (c)-[:HAS_SUMMARY]->(cs2:CaseSummary)
+      OPTIONAL MATCH (c)-[:HAS_ISSUES]->(li:LegalIssue)
+      OPTIONAL MATCH (c)-[:HAS_OUTCOMES]->(lo:LegalOutcome)
+      OPTIONAL MATCH (c)-[:HAS_LAWS_APPLIED]->(law:Law)
+      OPTIONAL MATCH (c)-[:HAS_LEGAL_PRINCIPLES]->(lp:LegalPrinciple)
+      OPTIONAL MATCH (c)-[:HAS_ARGUMENTS]->(la:LegalArgument)
+      OPTIONAL MATCH (c)-[:HAS_LEGAL_PRECEDENTS]->(lprec:LegalPrecedent)
+      OPTIONAL MATCH (c)-[:HAS_FACTS]->(lf:LegalFact)
+      OPTIONAL MATCH (c)-[:HAS_PRAYERS]->(pr:Prayer)
+
+      WITH c, cs, similarity, match_type, cs2,
+      collect(DISTINCT { judge_name: j.judge_name, judge_type: j.judge_type, judge_id: j.judge_id }) AS judges,
+      collect(DISTINCT { issue: li.issue, issue_raised_by: li.issue_raised_by, issue_outcome: li.issue_outcome }) AS legal_issues,
+      collect(DISTINCT { outcome: lo.outcome, outcome_date: lo.outcome_date, outcome_reason: lo.outcome_reason, outcome_type: lo.outcome_type}) AS legal_outcomes,
+      collect(DISTINCT { law_id: law.law_id, law: law.law, law_section: law.law_section, law_subsection: law.law_subsection, law_text: law.law_text, law_summary: law.law_summary, law_date: law.law_date, law_type: law.law_type }) AS laws_applied,
+      collect(DISTINCT { principle: lp.principle, principle_text: lp.principle_text, principle_source: lp.principle_source, principle_type: lp.principle_type, principle_id: lp.principle_id}) AS legal_principles,
+      collect(DISTINCT { argument: la.argument, argument_by: la.argument_by, argument_type: la.argument_type, argument_status: la.argument_status, argument_strength: la.argument_strength }) AS legal_arguments,
+      collect(DISTINCT { precedent: lprec.precedent, precedent_text: lprec.precedent_text, precedent_source: lprec.precedent_source, precedent_id: lprec.precedent_id }) AS legal_precedents,
+      collect(DISTINCT { fact: lf.fact, fact_type: lf.fact_type, fact_date: lf.fact_date, fact_by: lf.fact_by, fact_location: lf.fact_location, corroborating_evidence: lf.corroborating_evidence }) AS legal_facts,
+      collect(DISTINCT { prayer_type: pr.prayer_type, prayer_status: pr.prayer_status, prayer_by: pr.prayer_by, prayer: pr.prayer }) AS prayers
+
+      RETURN {
+          case: c {
+              .case_citation, .case_number, .date_filed, .court_location, .court_level, .jurisdiction, 
+              .case_action, .case_stage, .metadata_citation, .metadata_case_number, .metadata_date_delivered, 
+              .metadata_parties, .metadata_court, .metadata_advocate, .metadata_judges, .metadata_county, 
+              .metadata_doc_url, .metadata_url, .id, .court, .case_type, .case_sub_type, 
+              .metadata_country
+          },
+          matched_item: CASE 
+              WHEN match_type = 'summary' THEN { summary: cs.summary }
+              WHEN match_type = 'prayer' THEN { prayer_type: cs.prayer_type, prayer_status: cs.prayer_status, prayer_by: cs.prayer_by, prayer: cs.prayer }
+              WHEN match_type = 'issue' THEN { issue: cs.issue, issue_raised_by: cs.issue_raised_by, issue_outcome: cs.issue_outcome }
+              ELSE null
+          END,
+          match_type: match_type,
+          judges: judges,
+          case_summary: cs2.summary,
+          legal_issues: legal_issues,
+          legal_outcomes: legal_outcomes,
+          laws_applied: laws_applied,
+          legal_principles: legal_principles,
+          legal_arguments: legal_arguments,
+          legal_precedents: legal_precedents,
+          legal_facts: legal_facts,
+          prayers: prayers,
+          matched_text: CASE 
+              WHEN match_type = 'summary' THEN cs.summary 
+              WHEN match_type = 'prayer' THEN cs.prayer 
+              WHEN match_type = 'issue' THEN cs.issue
+              ELSE null
+          END,
+          similarity: similarity,
+          country: c.metadata_country
+      } AS result
+      ORDER BY similarity DESC
+
+  get_similar_cases_by_case_sub_type:
+    kind: neo4j-cypher
+    source: legal_db
+    description: "Get similar cases based on case sub-type."
+    parameters:
+      - name: query_embedding
+        type: string
+        description: "JSON string of the query embedding vector"
+      - name: country_code
+        type: string
+        description: "Country code to filter cases by (e.g., KE, UG, TZ)"
+    statement: |
+      CALL {
+          MATCH (c:Case)
+          WHERE c.case_embeddings IS NOT NULL
+          AND c.metadata_country = $country_code
+          WITH c, gds.similarity.cosine(apoc.convert.fromJsonList($embedding), c.case_embeddings) AS similarity
+          WHERE similarity > 0.7
+          RETURN c, c AS cs, similarity, 'case' AS match_type
+
+          UNION
+
+          MATCH (c:Case)-[:HAS_SUMMARY]->(cs:CaseSummary)
+          WHERE cs.case_summary_embeddings IS NOT NULL
+          AND c.metadata_country = $country_code
+          WITH c, cs, gds.similarity.cosine(apoc.convert.fromJsonList($embedding), cs.case_summary_embeddings) AS similarity
+          WHERE similarity > 0.7
+          RETURN c, cs, similarity, 'summary' AS match_type
+      }
+
+      WITH c, cs, similarity, match_type
+      ORDER BY similarity DESC
+      LIMIT 20
+
+      OPTIONAL MATCH (c)-[:HAS_JUDGES]->(j:Judge)
+      OPTIONAL MATCH (c)-[:HAS_ISSUES]->(li:LegalIssue)
+      OPTIONAL MATCH (c)-[:HAS_OUTCOMES]->(lo:LegalOutcome)
+      OPTIONAL MATCH (c)-[:HAS_LAWS_APPLIED]->(law:Law)
+      OPTIONAL MATCH (c)-[:HAS_LEGAL_PRINCIPLES]->(lp:LegalPrinciple)
+      OPTIONAL MATCH (c)-[:HAS_ARGUMENTS]->(la:LegalArgument)
+      OPTIONAL MATCH (c)-[:HAS_LEGAL_PRECEDENTS]->(lprec:LegalPrecedent)
+      OPTIONAL MATCH (c)-[:HAS_FACTS]->(lf:LegalFact)
+      OPTIONAL MATCH (c)-[:HAS_PRAYERS]->(pr:Prayer)
+
+      WITH c, cs, similarity, match_type,
+      collect(DISTINCT { judge_name: j.judge_name, judge_type: j.judge_type, judge_id: j.judge_id }) AS judges,
+      collect(DISTINCT { issue: li.issue, issue_raised_by: li.issue_raised_by, issue_outcome: li.issue_outcome }) AS legal_issues,
+      collect(DISTINCT { outcome: lo.outcome, outcome_date: lo.outcome_date, outcome_reason: lo.outcome_reason, outcome_type: lo.outcome_type}) AS legal_outcomes,
+      collect(DISTINCT { law_id: law.law_id, law: law.law, law_section: law.law_section, law_subsection: law.law_subsection, law_text: law.law_text, law_summary: law.law_summary, law_date: law.law_date, law_type: law.law_type }) AS laws_applied,
+      collect(DISTINCT { principle: lp.principle, principle_text: lp.principle_text, principle_source: lp.principle_source, principle_type: lp.principle_type, principle_id: lp.principle_id}) AS legal_principles,
+      collect(DISTINCT { argument: la.argument, argument_by: la.argument_by, argument_type: la.argument_type, argument_status: la.argument_status, argument_strength: la.argument_strength }) AS legal_arguments,
+      collect(DISTINCT { precedent: lprec.precedent, precedent_text: lprec.precedent_text, precedent_source: lprec.precedent_source, precedent_id: lprec.precedent_id }) AS legal_precedents,
+      collect(DISTINCT { fact: lf.fact, fact_type: lf.fact_type, fact_date: lf.fact_date, fact_by: lf.fact_by, fact_location: lf.fact_location, corroborating_evidence: lf.corroborating_evidence }) AS legal_facts,
+      collect(DISTINCT { prayer_type: pr.prayer_type, prayer_status: pr.prayer_status, prayer_by: pr.prayer_by, prayer: pr.prayer }) AS prayers
+
+      RETURN {
+          case: c {
+              .case_citation, .case_number, .date_filed, .court_location, .court_level, .jurisdiction, 
+              .case_action, .case_stage, .metadata_citation, .metadata_case_number, .metadata_date_delivered, 
+              .metadata_parties, .metadata_court, .metadata_advocate, .metadata_judges, .metadata_county, 
+              .metadata_doc_url, .metadata_url, .id, .court, .case_type, .case_sub_type,
+              .metadata_country
+          },
+          judges: judges,
+          case_summary: cs.summary,
+          legal_issues: legal_issues,
+          legal_outcomes: legal_outcomes,
+          laws_applied: laws_applied,
+          legal_principles: legal_principles,
+          legal_arguments: legal_arguments,
+          legal_precedents: legal_precedents,
+          legal_facts: legal_facts,
+          prayers: prayers,
+          matched_text: CASE
+              WHEN match_type = 'case' THEN c.case_sub_type
+              WHEN match_type = 'summary' THEN cs.summary
+              ELSE null
+          END,
+          similarity: similarity,
+          match_type: match_type,
+          country: c.metadata_country
+      } AS result
+
+  get_similar_cases_by_prayer:
+    kind: neo4j-cypher
+    source: legal_db
+    description: "Get similar cases based on prayers."
+    parameters:
+      - name: query_embedding
+        type: string
+        description: "JSON string of the query embedding vector"
+      - name: country_code
+        type: string
+        description: "Country code to filter cases by (e.g., KE, UG, TZ)"
+    statement: |
+      MATCH (c:Case)-[:HAS_PRAYERS]->(p:Prayer)
+      WHERE p.prayer_embeddings IS NOT NULL
+      AND c.metadata_country = $country_code
+      WITH c, p, gds.similarity.cosine(p.prayer_embeddings, apoc.convert.fromJsonList($embedding)) AS similarity
+      WHERE similarity > 0.7
+      WITH c, p, similarity
+      ORDER BY similarity DESC
+      LIMIT 30
+      
+      OPTIONAL MATCH (c)-[:HAS_JUDGES]->(j:Judge)
+      OPTIONAL MATCH (c)-[:HAS_SUMMARY]->(cs:CaseSummary)
+      OPTIONAL MATCH (c)-[:HAS_ISSUES]->(li:LegalIssue)
+      OPTIONAL MATCH (c)-[:HAS_OUTCOMES]->(lo:LegalOutcome)
+      OPTIONAL MATCH (c)-[:HAS_LAWS_APPLIED]->(law:Law)
+      OPTIONAL MATCH (c)-[:HAS_LEGAL_PRINCIPLES]->(lp:LegalPrinciple)
+      OPTIONAL MATCH (c)-[:HAS_ARGUMENTS]->(la:LegalArgument)
+      OPTIONAL MATCH (c)-[:HAS_LEGAL_PRECEDENTS]->(lprec:LegalPrecedent)
+      OPTIONAL MATCH (c)-[:HAS_FACTS]->(lf:LegalFact)
+      OPTIONAL MATCH (c)-[:HAS_PRAYERS]->(pr:Prayer)
+
+      WITH c, p, similarity, cs,
+      collect(DISTINCT { judge_name: j.judge_name, judge_type: j.judge_type, judge_id: j.judge_id }) AS judges,
+      collect(DISTINCT { issue: li.issue, issue_raised_by: li.issue_raised_by, issue_outcome: li.issue_outcome }) AS legal_issues,
+      collect(DISTINCT { outcome: lo.outcome, outcome_date: lo.outcome_date, outcome_reason: lo.outcome_reason, outcome_type: lo.outcome_type}) AS legal_outcomes,
+      collect(DISTINCT { law_id: law.law_id, law: law.law, law_section: law.law_section, law_subsection: law.law_subsection, law_text: law.law_text, law_summary: law.law_summary, law_date: law.law_date, law_type: law.law_type }) AS laws_applied,
+      collect(DISTINCT { principle: lp.principle, principle_text: lp.principle_text, principle_source: lp.principle_source, principle_type: lp.principle_type, principle_id: lp.principle_id}) AS legal_principles,
+      collect(DISTINCT { argument: la.argument, argument_by: la.argument_by, argument_type: la.argument_type, argument_status: la.argument_status, argument_strength: la.argument_strength }) AS legal_arguments,
+      collect(DISTINCT { precedent: lprec.precedent, precedent_text: lprec.precedent_text, precedent_source: lprec.precedent_source, precedent_id: lprec.precedent_id }) AS legal_precedents,
+      collect(DISTINCT { fact: lf.fact, fact_type: lf.fact_type, fact_date: lf.fact_date, fact_by: lf.fact_by, fact_location: lf.fact_.corroborating_evidence }) AS legal_facts,
+      collect(DISTINCT { prayer_type: pr.prayer_type, prayer_status: pr.prayer_status, prayer_by: pr.prayer_by, prayer: pr.prayer }) AS all_prayers
+
+      RETURN {
+          case: c {
+              .case_citation, .case_number, .date_filed, .court_location, .court_level, .jurisdiction, 
+              .case_action, .case_stage, .metadata_citation, .metadata_case_number, .metadata_date_delivered, 
+              .metadata_parties, .metadata_court, .metadata_advocate, .metadata_judges, .metadata_county, 
+              .metadata_doc_url, .metadata_url, .id, .court, .case_type, .case_sub_type,
+              .metadata_country
+          },
+          prayers: all_prayers,
+          judges: judges,
+          case_summary: cs.summary,
+          legal_issues: legal_issues,
+          legal_outcomes: legal_outcomes,
+          laws_applied: laws_applied,
+          legal_principles: legal_principles,
+          legal_arguments: legal_arguments,
+          legal_precedents: legal_precedents,
+          legal_facts: legal_facts,
+          matched_prayer: {
+              prayer_type: p.prayer_type,
+              prayer_status: p.prayer_status,
+              prayer_by: p.prayer_by,
+              prayer: p.prayer
+          },
+          matched_text: p.prayer,
+          similarity: similarity,
+          country: c.metadata_country
+      } AS result
+      ORDER BY similarity DESC
+
+  get_similar_cases_by_legal_issues_raised:
+    kind: neo4j-cypher
+    source: legal_db
+    description: "Get similar cases based on legal issues raised."
+    parameters:
+      - name: query_embedding
+        type: string
+        description: "JSON string of the query embedding vector"
+      - name: country_code
+        type: string
+        description: "Country code to filter cases by (e.g., KE, UG, TZ)"
+    statement: |
+      CALL {
+          MATCH (c:Case)-[:HAS_ISSUES]->(li:LegalIssue)
+          WHERE li.legal_issue_embeddings IS NOT NULL
+          AND c.metadata_country = $country_code
+          WITH c, li, gds.similarity.cosine(li.legal_issue_embeddings, apoc.convert.fromJsonList($embedding)) AS similarity
+          WHERE similarity > 0.7
+          RETURN c, li AS matched_node, similarity, 'issue' AS match_type
+
+          UNION
+
+          MATCH (c:Case)-[:HAS_SUMMARY]->(cs:CaseSummary)
+          WHERE cs.case_summary_embeddings IS NOT NULL
+          AND c.metadata_country = $country_code
+          WITH c, cs, gds.similarity.cosine(cs.case_summary_embeddings, apoc.convert.fromJsonList($embedding)) AS similarity
+          WHERE similarity > 0.5
+          RETURN c, cs AS matched_node, similarity, 'summary' AS match_type
+      }
+
+      WITH c, matched_node, similarity, match_type
+      ORDER BY similarity DESC
+      LIMIT 30
+
+      OPTIONAL MATCH (c)-[:HAS_JUDGES]->(j:Judge)
+      OPTIONAL MATCH (c)-[:HAS_SUMMARY]->(cs:CaseSummary)
+      OPTIONAL MATCH (c)-[:HAS_OUTCOMES]->(lo:LegalOutcome)
+      OPTIONAL MATCH (c)-[:HAS_LAWS_APPLIED]->(law:Law)
+      OPTIONAL MATCH (c)-[:HAS_LEGAL_PRINCIPLES]->(lp:LegalPrinciple)
+      OPTIONAL MATCH (c)-[:HAS_ARGUMENTS]->(la:LegalArgument)
+      OPTIONAL MATCH (c)-[:HAS_LEGAL_PRECEDENTS]->(lprec:LegalPrecedent)
+      OPTIONAL MATCH (c)-[:HAS_FACTS]->(lf:LegalFact)
+      OPTIONAL MATCH (c)-[:HAS_PRAYERS]->(pr:Prayer)
+      OPTIONAL MATCH (c)-[:HAS_ISSUES]->(all_li:LegalIssue)
+
+      WITH c, matched_node, similarity, match_type, cs,
+      collect(DISTINCT { judge_name: j.judge_name, judge_type: j.judge_type, judge_id: j.judge_id }) AS judges,
+      collect(DISTINCT { outcome: lo.outcome, outcome_date: lo.outcome_date, outcome_reason: lo.outcome_reason, outcome_type: lo.outcome_type}) AS legal_outcomes,
+      collect(DISTINCT { law_id: law.law_id, law: law.law, law_section: law.law_section, law_subsection: law.law_subsection, law_text: law.law_text, law_summary: law.law_summary, law_date: law.law_date, law_type: law.law_type }) AS laws_applied,
+      collect(DISTINCT { principle: lp.principle, principle_text: lp.principle_text, principle_source: lp.principle_source, principle_type: lp.principle_type, principle_id: lp.principle_id}) AS legal_principles,
+      collect(DISTINCT { argument: la.argument, argument_by: la.argument_by, argument_type: la.argument_type, argument_status: la.argument_status, argument_strength: la.argument_strength }) AS legal_arguments,
+      collect(DISTINCT { precedent: lprec.precedent, precedent_text: lprec.precedent_text, precedent_source: lprec.precedent_source, precedent_id: lprec.precedent_id }) AS legal_precedents,
+      collect(DISTINCT { fact: lf.fact, fact_type: lf.fact_type, fact_date: lf.fact_date, fact_by: lf.fact_by, fact_location: lf.fact_location, corroborating_evidence: lf.corroborating_evidence }) AS legal_facts,
+      collect(DISTINCT { prayer_type: pr.prayer_type, prayer_status: pr.prayer_status, prayer_by: pr.prayer_by, prayer: pr.prayer }) AS prayers,
+      collect(DISTINCT { issue: all_li.issue, issue_outcome: all_li.issue_outcome, issue_raised_by: all_li.issue_raised_by }) AS all_legal_issues
+
+      RETURN {
+          case: c {
+              .case_citation, .case_number, .date_filed, .court_location, .court_level, .jurisdiction, 
+              .case_action, .case_stage, .metadata_citation, .metadata_case_number, .metadata_date_delivered, 
+              .metadata_parties, .metadata_court, .metadata_advocate, .metadata_judges, .metadata_county, 
+              .metadata_doc_url, .metadata_url, .id, .court, .case_type, .case_sub_type,
+              .metadata_country
+          },
+          matched_item: CASE 
+              WHEN match_type = 'issue' THEN {
+                  issue: matched_node.issue,
+                  issue_outcome: matched_node.issue_outcome,
+                  issue_raised_by: matched_node.issue_raised_by
+              }
+              WHEN match_type = 'summary' THEN {
+                  summary: matched_node.summary
+              }
+              ELSE null
+          END,
+          match_type: match_type,
+          legal_issues: all_legal_issues,
+          judges: judges,
+          case_summary: cs.summary,
+          legal_outcomes: legal_outcomes,
+          laws_applied: laws_applied,
+          legal_principles: legal_principles,
+          legal_arguments: legal_arguments,
+          legal_precedents: legal_precedents,
+          legal_facts: legal_facts,
+          prayers: prayers,
+          matched_text: CASE 
+              WHEN match_type = 'issue' THEN matched_node.issue
+              WHEN match_type = 'summary' THEN matched_node.summary
+              ELSE null
+          END,
+          similarity: similarity,
+          country: c.metadata_country
+      } AS result
+      ORDER BY similarity DESC
+
+  get_cases_by_country:
+    kind: neo4j-cypher
+    source: legal_db
+    description: "Get cases filtered by country."
+    parameters:
+      - name: country_code
+        type: string
+        description: "Country code to filter by"
+      - name: limit
+        type: integer
+        description: "Maximum number of cases to return"
+    statement: |
+      MATCH (c:Case)
+      WHERE c.metadata_country = $country_code
+      
+      OPTIONAL MATCH (c)-[:HAS_SUMMARY]->(cs:CaseSummary)
+      OPTIONAL MATCH (c)-[:HAS_JUDGES]->(j:Judge)
+      OPTIONAL MATCH (c)-[:HAS_ISSUES]->(li:LegalIssue)
+      OPTIONAL MATCH (c)-[:HAS_OUTCOMES]->(lo:LegalOutcome)
+      OPTIONAL MATCH (c)-[:HAS_LAWS_APPLIED]->(law:Law)
+      OPTIONAL MATCH (c)-[:HAS_LEGAL_PRINCIPLES]->(lp:LegalPrinciple)
+      
+      WITH c, cs,
+      collect(DISTINCT { judge_name: j.judge_name, judge_type: j.judge_type, judge_id: j.judge_id }) AS judges,
+      collect(DISTINCT { issue: li.issue, issue_raised_by: li.issue_raised_by, issue_outcome: li.issue_outcome }) AS legal_issues,
+      collect(DISTINCT { outcome: lo.outcome, outcome_date: lo.outcome_date, outcome_reason: lo.outcome_reason, outcome_type: lo.outcome_type}) AS legal_outcomes,
+      collect(DISTINCT { law_id: law.law_id, law: law.law, law_section: law.law_section, law_text: law.law_text }) AS laws_applied,
+      collect(DISTINCT { principle: lp.principle, principle_text: lp.principle_text }) AS legal_principles
+      
+      RETURN {
+          case: c {
+              .case_citation, .case_number, .date_filed, .court_location, .court_level, .jurisdiction, 
+              .case_action, .case_stage, .metadata_citation, .metadata_case_number, .metadata_date_delivered, 
+              .metadata_parties, .metadata_court, .metadata_advocate, .metadata_judges, .metadata_county, 
+              .metadata_doc_url, .metadata_url, .id, .court, .case_type, .case_sub_type, 
+              .metadata_country
+          },
+          case_summary: cs.summary,
+          judges: judges,
+          legal_issues: legal_issues,
+          legal_outcomes: legal_outcomes,
+          laws_applied: laws_applied,
+          legal_principles: legal_principles,
+          filter: { country: $country_code },
+          similarity: 1.0
+      } AS result
+      
+      ORDER BY c.date_filed DESC
+      LIMIT $limit
