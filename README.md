@@ -53,8 +53,29 @@ The Ewakili Legal Research Agent is designed to assist legal practitioners, rese
 Install the required Python packages:
 
 ```bash
+# Create virtual environment (recommended)
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
 pip install -r requirements.txt
 ```
+
+### System Requirements
+
+**Minimum Requirements:**
+- Python 3.8+
+- 8GB RAM (16GB recommended)
+- 10GB free disk space
+- Neo4j 4.0+ with APOC and GDS plugins
+- Internet connection for Google AI services
+
+**Recommended Setup:**
+- Python 3.10+
+- 16GB RAM
+- SSD storage
+- Docker for containerized services
+- Linux/macOS (Windows supported but not optimal)
 
 ### Key Dependencies
 
@@ -63,6 +84,24 @@ pip install -r requirements.txt
 - `toolbox-langchain`: Custom toolbox for legal research tools
 - `neo4j`: Neo4j database driver
 - `google-generativeai`: Google's generative AI SDK
+
+### Health Checks
+
+After installation, verify all components:
+
+```bash
+# Check Python version
+python --version
+
+# Verify Neo4j connection
+python -c "from neo4j import GraphDatabase; print('Neo4j driver OK')"
+
+# Test Google AI authentication
+python -c "import google.generativeai as genai; print('Google AI SDK OK')"
+
+# Verify toolbox connectivity
+curl -s http://localhost:5000/health || echo "Toolbox server not running"
+```
 
 ## Setup
 
@@ -94,13 +133,152 @@ export GOOGLE_APPLICATION_CREDENTIALS="path/to/service_account_key.json"
 export GOOGLE_API_KEY="your_google_api_key"
 ```
 
-### 3. Toolbox Server
+### 3. Toolbox Server Setup
 
-Start the toolbox server (if using external toolbox):
+The toolbox server is required to run the legal research tools. Follow these steps to set it up:
+
+#### Starting the Toolbox Server
+
+1. **Navigate to the toolbox directory** (if toolbox is in a separate directory):
+   ```bash
+   cd /path/to/toolbox
+   ```
+
+2. **Start the toolbox server**:
+   ```bash
+   # Option 1: Using the toolbox binary (if available)
+   ./toolbox serve --port 5000 --config ../ewakili_agent/tools.yaml
+   
+   # Option 2: Using Python toolbox module
+   python -m toolbox serve --port 5000 --config ../ewakili_agent/tools.yaml
+   
+   # Option 3: Direct execution (if toolbox is executable)
+   toolbox serve --port 5000 --config tools.yaml
+   ```
+
+3. **Verify the server is running**:
+   ```bash
+   # Check if the server is responding
+   curl http://localhost:5000/health
+   
+   # Or check the tools endpoint
+   curl http://localhost:5000/tools
+   ```
+
+#### Toolbox Configuration
+
+The toolbox server reads configuration from `tools.yaml` and connects to your Neo4j database. Ensure:
+
+- Neo4j is running and accessible
+- Database credentials are correct in `tools.yaml`
+- All required Neo4j plugins are installed (APOC, GDS)
+
+#### Alternative: Docker Setup
+
+If you prefer using Docker for the toolbox:
 
 ```bash
-# The toolbox server should be running on localhost:5000
-# Check toolbox documentation for startup instructions
+# Build the toolbox container (if Dockerfile is available)
+docker build -t legal-toolbox .
+
+# Run the toolbox container
+docker run -p 5000:5000 -v $(pwd)/tools.yaml:/app/tools.yaml legal-toolbox
+
+# Or using docker-compose (if available)
+docker-compose up toolbox
+```
+
+## Quick Start Guide
+
+### Step-by-Step System Startup
+
+Follow these steps to get the complete system running:
+
+#### 1. Start Neo4j Database
+
+**Option A: Using Docker**
+```bash
+# Start Neo4j with required plugins
+docker run -d \
+  --name neo4j-legal \
+  -p 7474:7474 -p 7687:7687 \
+  -e NEO4J_AUTH=neo4j/f7DEfxd9wy5. \
+  -e NEO4J_PLUGINS='["apoc", "graph-data-science"]' \
+  -v neo4j_data:/data \
+  neo4j:5.0
+```
+
+**Option B: Using Local Installation**
+```bash
+# Start Neo4j service
+sudo systemctl start neo4j
+
+# Or if using Neo4j Desktop, start the database from the interface
+```
+
+#### 2. Verify Neo4j is Running
+
+```bash
+# Check Neo4j status
+curl http://localhost:7474
+
+# Access Neo4j Browser
+open http://localhost:7474
+```
+
+#### 3. Start the Toolbox Server
+
+```bash
+# Navigate to your project directory
+cd /home/ngobiro/projects/ewakili_agent
+
+# Start toolbox server (choose one method)
+./toolbox serve --port 5000 --config tools.yaml
+
+# Verify toolbox is running
+curl http://localhost:5000/health
+```
+
+#### 4. Run the Legal Research Agent
+
+```bash
+# Activate virtual environment (if using one)
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the agent
+python agent.py
+```
+
+#### 5. Troubleshooting Startup Issues
+
+**Neo4j Connection Issues:**
+```bash
+# Check Neo4j logs
+docker logs neo4j-legal
+
+# Test connection
+neo4j-admin server console
+```
+
+**Toolbox Server Issues:**
+```bash
+# Check if port is available
+netstat -tlnp | grep :5000
+
+# Test tools configuration
+./toolbox validate --config tools.yaml
+```
+
+**Agent Runtime Issues:**
+```bash
+# Check Python dependencies
+pip check
+
+# Verify Google Cloud credentials
+gcloud auth application-default print-access-token
 ```
 
 ## Usage
@@ -112,6 +290,19 @@ from agent import main
 
 # Run the agent
 main()
+```
+
+### Interactive Usage
+
+You can also run the agent interactively:
+
+```bash
+# Start Python interactive session
+python -i agent.py
+
+# Then use individual functions
+embedding = get_text_embedding("contract law")
+query_params = create_embedding_query("employment disputes", "KE")
 ```
 
 ### Custom Queries
