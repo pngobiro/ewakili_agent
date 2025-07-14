@@ -696,4 +696,3 @@ tools:
       
       ORDER BY c.date_filed DESC
       LIMIT $limit
-
